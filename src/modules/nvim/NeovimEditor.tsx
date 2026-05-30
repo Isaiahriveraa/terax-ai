@@ -4,8 +4,7 @@ import {
   useImperativeHandle,
   useRef,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { NeovimGridRenderer } from "./lib/neovimGrid";
 import type { NeovimEditorHandle, NvimEvent } from "./lib/types";
 
@@ -35,43 +34,37 @@ function NeovimEditor({ path, onDirtyChange, onSaved, onClose }, ref) {
       const renderer = new NeovimGridRenderer(container);
       rendererRef.current = renderer;
 
-      let unlisten: UnlistenFn | undefined;
-      let unlistenExit: UnlistenFn | undefined;
-      let unlistenDirty: UnlistenFn | undefined;
       let alive = true;
 
       async function init() {
         const cols = Math.max(40, Math.floor(container!.clientWidth / 8));
         const rows = Math.max(10, Math.floor(container!.clientHeight / 20));
 
-        // Listen for redraw events from the Rust backend
-        unlisten = await listen<NvimEvent[]>("nvim://redraw", (event) => {
+        // Create channels for receiving events from Rust backend
+        const redrawChannel = new Channel<NvimEvent>();
+        redrawChannel.onmessage = (event) => {
           if (!alive) return;
-          for (const evt of event.payload) {
-            renderer.handleEvent(evt);
+          renderer.handleEvent(event);
+          // Forward dirty state changes to parent
+          if (event.type === "dirty_change") {
+            onDirtyChangeRef.current?.((event as any).modified);
           }
-        });
+        };
 
-        // Listen for exit events
-        unlistenExit = await listen<number>("nvim://exit", () => {
+        const exitChannel = new Channel<number>();
+        exitChannel.onmessage = (code) => {
           if (!alive) return;
+          console.log("neovim exited with code", code);
           onClose?.();
-        });
-
-        // Listen for dirty state changes
-        unlistenDirty = await listen<{ bufnr: number; modified: boolean }>(
-          "nvim://dirty",
-          (event) => {
-            if (!alive) return;
-            onDirtyChangeRef.current?.(event.payload.modified);
-          },
-        );
+        };
 
         try {
           const bufnr = await invoke<number>("nvim_open", {
             path,
             cols,
             rows,
+            on_redraw: redrawChannel,
+            on_exit: exitChannel,
           });
           if (alive) {
             bufnrRef.current = bufnr;
@@ -87,9 +80,6 @@ function NeovimEditor({ path, onDirtyChange, onSaved, onClose }, ref) {
         alive = false;
         renderer.destroy();
         rendererRef.current = null;
-        unlisten?.();
-        unlistenExit?.();
-        unlistenDirty?.();
         // Close the neovim instance
         if (bufnrRef.current) {
           void invoke("nvim_close", { bufnr: bufnrRef.current }).catch(
