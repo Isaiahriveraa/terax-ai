@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use tauri::ipc::Channel;
 
@@ -10,11 +13,13 @@ use crate::modules::nvim::rpc;
 use crate::modules::nvim::ui_events::{self, NvimEvent};
 
 const STDERR_BUF: usize = 4 * 1024;
+const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct NvimSession {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
     next_msgid: AtomicU32,
+    pending: Arc<Mutex<HashMap<u32, mpsc::Sender<Result<rmpv::Value, String>>>>>,
 }
 
 impl NvimSession {
@@ -53,10 +58,14 @@ impl NvimSession {
             .spawn(move || drain_stderr(stderr))
             .map_err(|e| format!("spawn nvim stderr thread: {e}"))?;
 
+        let pending: Arc<Mutex<HashMap<u32, mpsc::Sender<Result<rmpv::Value, String>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
         let session = Arc::new(NvimSession {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             next_msgid: AtomicU32::new(1),
+            pending: pending.clone(),
         });
 
         let reader_session = session.clone();
@@ -65,6 +74,7 @@ impl NvimSession {
             .spawn(move || reader_thread(stdout, reader_session, on_redraw, on_exit))
             .map_err(|e| format!("spawn nvim reader thread: {e}"))?;
 
+        // Initialize: get API info, attach UI, inject Lua config
         session.call("nvim_get_api_info", vec![])?;
         session.call(
             "nvim_ui_attach",
@@ -106,25 +116,42 @@ impl NvimSession {
     pub fn call(&self, method: &str, params: Vec<rmpv::Value>) -> Result<rmpv::Value, String> {
         let msgid = self.next_msgid.fetch_add(1, Ordering::Relaxed);
         let bytes = rpc::encode_request(msgid, method, params);
-        let result = {
-            let mut stdin = self.stdin.lock().unwrap();
-            stdin.write_all(&bytes).and_then(|_| stdin.flush())
-        };
-        result.map_err(|e| {
-            log::debug!("nvim call {method} msgid={msgid} failed: {e}");
-            e.to_string()
-        })?;
-        Ok(rmpv::Value::Nil)
+
+        // Create response channel
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut pending = self.pending.lock().map_err(|e| e.to_string())?;
+            pending.insert(msgid, tx);
+        }
+
+        // Send request
+        {
+            let mut stdin = self.stdin.lock().map_err(|e| e.to_string())?;
+            stdin
+                .write_all(&bytes)
+                .and_then(|_| stdin.flush())
+                .map_err(|e| format!("nvim write {method}: {e}"))?;
+        }
+
+        // Wait for response
+        match rx.recv_timeout(RPC_TIMEOUT) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => Err(e),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                log::warn!("nvim call {method} msgid={msgid} timed out");
+                self.pending.lock().ok().and_then(|mut p| p.remove(&msgid));
+                Err(format!("nvim call {method} timed out"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("nvim reader thread disconnected".into())
+            }
+        }
     }
 
     pub fn close(&self) {
         if let Ok(mut stdin) = self.stdin.lock() {
             let msgid = self.next_msgid.fetch_add(1, Ordering::Relaxed);
-            let bytes = rpc::encode_request(
-                msgid,
-                "nvim_command",
-                vec![rmpv::Value::from("qa!")],
-            );
+            let bytes = rpc::encode_request(msgid, "nvim_command", vec![rmpv::Value::from("qa!")]);
             let _ = stdin.write_all(&bytes);
             let _ = stdin.flush();
         }
@@ -175,10 +202,12 @@ pub fn reader_thread(
                 handle_notification(method, params, &on_redraw);
             }
             Ok(rpc::RpcMessage::Response { msgid, error, result }) => {
-                if let Some(error) = error.filter(|e| !e.is_nil()) {
-                    log::debug!("nvim response msgid={msgid} error={error:?}");
-                } else {
-                    log::trace!("nvim response msgid={msgid} result={result:?}");
+                let response = match error.filter(|e| !e.is_nil()) {
+                    Some(e) => Err(format!("nvim error msgid={msgid}: {e:?}")),
+                    None => Ok(result.unwrap_or(rmpv::Value::Nil)),
+                };
+                if let Some(tx) = session.pending.lock().ok().and_then(|mut p| p.remove(&msgid)) {
+                    let _ = tx.send(response);
                 }
             }
             Ok(rpc::RpcMessage::Request { msgid, method, params }) => {
@@ -217,7 +246,6 @@ fn handle_notification(method: String, params: Vec<rmpv::Value>, on_redraw: &Cha
             log::info!("nvim clipboard paste requested");
         }
         "buf_modified_set" => {
-            log::debug!("nvim buf_modified_set notification: {params:?}");
             if let (Some(bufnr), Some(modified)) = (
                 params.first().and_then(|v| v.as_u64()),
                 params.get(1).and_then(|v| v.as_bool()),
