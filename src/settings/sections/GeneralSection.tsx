@@ -32,6 +32,7 @@ import {
   setTerminalScrollback,
   setTerminalWebglEnabled,
   setVimMode,
+  setNeovimMode,
   setZoomLevel,
 } from "@/modules/settings/store";
 import { useTheme } from "@/modules/theme";
@@ -70,6 +71,7 @@ export function GeneralSection() {
   const autostart = usePreferencesStore((s) => s.autostart);
   const restoreWindowState = usePreferencesStore((s) => s.restoreWindowState);
   const vimMode = usePreferencesStore((s) => s.vimMode);
+  const neovimMode = usePreferencesStore((s) => s.neovimMode);
   const editorAutoSave = usePreferencesStore((s) => s.editorAutoSave);
   const editorAutoSaveDelay = usePreferencesStore((s) => s.editorAutoSaveDelay);
   const showHidden = usePreferencesStore((s) => s.showHidden);
@@ -173,6 +175,15 @@ export function GeneralSection() {
           <Switch
             checked={vimMode}
             onCheckedChange={(v) => void setVimMode(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Neovim mode"
+          description="Use an embedded Neovim instance as the editor. Replaces CodeMirror with a real Neovim backend."
+        >
+          <Switch
+            checked={neovimMode}
+            onCheckedChange={(v) => void setNeovimMode(v)}
           />
         </SettingRow>
         <SettingRow

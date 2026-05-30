@@ -7,6 +7,7 @@ import {
 } from "@codemirror/search";
 import { keymap } from "@codemirror/view";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { NeovimEditor } from "@/modules/nvim";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { EDITOR_THEME_EXT } from "./lib/themes";
 import {
@@ -68,6 +69,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     const cmRef = useRef<ReactCodeMirrorRef>(null);
     const editorThemeId = usePreferencesStore((s) => s.editorTheme);
     const vimMode = usePreferencesStore((s) => s.vimMode);
+    const neovimMode = usePreferencesStore((s) => s.neovimMode);
     const languageRef = useRef<string | null>(null);
     const apiKeyRef = useRef<string | null>(null);
 
@@ -267,6 +269,12 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       [path],
     );
 
+
+    if (neovimMode) {
+      // Neovim owns file I/O — no useDocument, no fs_write_file
+      // File content lives in Neovim's buffer, dirty state from &modified
+      return <NeovimEditor path={path} onDirtyChange={onDirtyChange} onSaved={onSaved} onClose={onClose} />;
+    }
     if (doc.status === "loading") {
       return (
         <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
