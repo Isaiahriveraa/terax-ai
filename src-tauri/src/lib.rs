@@ -1,6 +1,6 @@
 pub mod modules;
 
-use modules::{agent, fs, git, net, pty, secrets, shell, workspace};
+use modules::{agent, fs, git, net, nvim, pty, secrets, shell, workspace};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
@@ -111,6 +111,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(pty::PtyState::default())
         .manage(shell::ShellState::default())
+        .manage(nvim::NvimState::default())
         .manage(secrets::SecretsState::default())
         .manage(fs::watch::FsWatchState::default())
         .manage({
@@ -128,6 +129,12 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_close,
             pty::pty_close_all,
+            nvim::nvim_open,
+            nvim::nvim_switch_buffer,
+            nvim::nvim_input,
+            nvim::nvim_resize,
+            nvim::nvim_close,
+            nvim::nvim_shutdown,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,
